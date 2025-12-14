@@ -1,0 +1,183 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: transferhub-postgres
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres123
+      POSTGRES_DB: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - transferhub
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U postgres" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: transferhub-redis
+    command: redis-server --appendonly yes --requirepass redis123
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - transferhub
+    healthcheck:
+      test: [ "CMD", "redis-cli", "--raw", "incr", "ping" ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    container_name: transferhub-rabbitmq
+    hostname: rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: rabbitmq
+      RABBITMQ_DEFAULT_PASS: rabbitmq123
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    networks:
+      - transferhub
+    healthcheck:
+      test: [ "CMD", "rabbitmq-diagnostics", "ping" ]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+    restart: unless-stopped
+
+  account-api:
+    build:
+      context: .
+      dockerfile: src/Services/Account/Account.API/Dockerfile
+    container_name: transferhub-account-api
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - ASPNETCORE_URLS=http://+:80
+      - ConnectionStrings__PostgresDb=Host=postgres;Port=5432;Database=AccountDb;Username=postgres;Password=postgres123;Include Error Detail=true
+      - RedisOptions__ConnectionString=redis:6379,password=redis123
+      - RedisOptions__InstanceName=TransferHub
+      - RabbitMQOptions__Host=rabbitmq
+      - RabbitMQOptions__Username=rabbitmq
+      - RabbitMQOptions__Password=rabbitmq123
+      - JwtOptions__SecretKey=THub_Prod_JWT_9XK7mF2a8QpWcE6Z0sH4dYVnB1
+      - JwtOptions__Issuer=TransferHub
+      - JwtOptions__Audience=TransferHub
+      - OpenTelemetry__OtlpEndpoint=http://otel-collector:4317
+      - Serilog__WriteTo__1__Args__serverUrl=http://seq:5341
+    ports:
+      - "5000:80"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - transferhub
+      - observability
+    restart: unless-stopped
+
+  moneytransfer-api:
+    build:
+      context: .
+      dockerfile: src/Services/MoneyTransfer/MoneyTransfer.API/Dockerfile
+    container_name: transferhub-moneytransfer-api
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - ASPNETCORE_URLS=http://+:80
+      - ConnectionStrings__PostgresDb=Host=postgres;Port=5432;Database=MoneyTransferDb;Username=postgres;Password=postgres123;Include Error Detail=true
+      - RedisOptions__ConnectionString=redis:6379,password=redis123
+      - RedisOptions__InstanceName=TransferHub
+      - RabbitMQOptions__Host=rabbitmq
+      - RabbitMQOptions__Username=rabbitmq
+      - RabbitMQOptions__Password=rabbitmq123
+      - JwtOptions__SecretKey=THub_Prod_JWT_9XK7mF2a8QpWcE6Z0sH4dYVnB1
+      - JwtOptions__Issuer=TransferHub
+      - JwtOptions__Audience=TransferHub
+      - OpenTelemetry__OtlpEndpoint=http://otel-collector:4317
+      - Serilog__WriteTo__1__Args__serverUrl=http://seq:5341
+    ports:
+      - "5001:80"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    networks:
+      - transferhub
+      - observability
+    restart: unless-stopped
+
+  bff-api:
+    build:
+      context: .
+      dockerfile: src/Services/BFF/BFF.API/Dockerfile
+    container_name: transferhub-bff-api
+    environment:
+      - ASPNETCORE_ENVIRONMENT=Development
+      - ASPNETCORE_URLS=http://+:80
+      - RedisOptions__ConnectionString=redis:6379,password=redis123
+      - RedisOptions__InstanceName=TransferHub
+      - JwtOptions__SecretKey=THub_Prod_JWT_9XK7mF2a8QpWcE6Z0sH4dYVnB1
+      - JwtOptions__Issuer=TransferHub
+      - JwtOptions__Audience=TransferHub
+      - OpenTelemetry__OtlpEndpoint=http://otel-collector:4317
+      - Serilog__WriteTo__1__Args__serverUrl=http://seq:5341
+      - ReverseProxy__Clusters__account-cluster__Destinations__destination1__Address=http://account-api:80
+      - ReverseProxy__Clusters__transfer-cluster__Destinations__destination1__Address=http://moneytransfer-api:80
+      - AllowedOrigins=http://localhost:3000,http://frontend:3000
+    ports:
+      - "5002:80"
+    depends_on:
+      - account-api
+      - moneytransfer-api
+      - redis
+    networks:
+      - transferhub
+      - observability
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./src/Frontend
+      dockerfile: Dockerfile
+    container_name: transferhub-frontend
+    environment:
+      - NODE_ENV=production
+      - NEXT_PUBLIC_API_URL=http://localhost:5002
+    ports:
+      - "3000:3000"
+    depends_on:
+      - bff-api
+    networks:
+      - transferhub
+    restart: unless-stopped
+
+networks:
+  transferhub:
+    driver: bridge
+  observability:
+    name: account_observability
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  rabbitmq_data:
