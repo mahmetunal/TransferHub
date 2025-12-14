@@ -380,3 +380,4 @@ package-lock.json
 rabbitmq_data/
 postgres_data/
 redis_data/
+.DS_Store
